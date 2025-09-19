@@ -1,0 +1,438 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>JIS-BASICエミュレータ（4画面・ステップ実行・ELSE対応・iPadドラッグ可）</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin:0; background:#0b0c10; color:#e7ecef; font-family: ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,"Noto Sans JP","Hiragino Kaku Gothic ProN","Yu Gothic",Meiryo,sans-serif; }
+  header{display:flex;gap:.5rem;align-items:center;padding:.6rem 1rem;border-bottom:1px solid #222;background:#0f1116;position:sticky;top:0;z-index:50}
+  h1{font-size:1rem;margin:0 .5rem 0 0;font-weight:800}
+  button{border:0;border-radius:12px;padding:.5rem .8rem;font-weight:700;cursor:pointer}
+  .run{background:#10b981;color:#04110c}.stop{background:#ef4444;color:#220909}
+  .reset{background:#0ea5e9;color:#031219}.clear{background:#6b7280;color:#0d1014}
+  .chk{margin-left:.5rem}
+  /* ===== 2×2 グリッド ===== */
+  .grid{height:calc(100vh - 56px);display:grid;grid-template-columns: 1fr 1fr;grid-template-rows: 55% 45%;gap:6px;padding:6px}
+  .pane{background:#10131a;border:1px solid #1f2330;border-radius:12px;display:flex;flex-direction:column;overflow:hidden}
+  .pane h2{margin:0;padding:.55rem .8rem;border-bottom:1px solid #1f2330;font-size:.9rem;opacity:.9}
+  .pane-body{flex:1;overflow:auto;padding:.6rem}
+  textarea#editor{width:100%;height:100%;resize:none;background:#0b0d12;color:#e8eefa;border:1px solid #2a2f3b;border-radius:8px;padding:.8rem;font-family:ui-monospace,SFMono-Regular,Consolas,Menlo,monospace;font-size:13px;line-height:1.55}
+  .console{white-space:pre-wrap;background:#000;color:#38f08f;border:1px solid #2a2f3b;border-radius:8px;padding:.8rem;min-height:260px}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{border-bottom:1px solid #222;padding:.35rem .4rem;text-align:left}
+  .delta{opacity:.85}
+  .trace{font-family:ui-monospace,SFMono-Regular,Consolas,Menlo,monospace;font-size:12px;white-space:pre-wrap}
+  .cur{background:#112a46}
+  /* ===== ドラッグハンドル（全端末でドラッグ可） ===== */
+  .vsplit,.hsplit{
+    position:absolute;
+    background: rgba(255,255,255,.06);
+    border-radius: 6px;
+    touch-action: none;     /* iPad でスクロールに奪われない */
+    pointer-events: auto;
+    z-index: 1000;
+  }
+  .vsplit{
+    width: 12px;            /* 掴みやすく */
+    cursor: col-resize;
+    top: 6px; bottom: 6px;
+    left: calc(50% - 6px);
+  }
+  .hsplit{
+    height: 12px;           /* 掴みやすく */
+    cursor: row-resize;
+    left: 6px; right: 6px;
+    top: calc(55% - 6px);
+  }
+  .wrap{position:relative}
+  .hint{font-size:12px;opacity:.8;margin-top:.4rem}
+  .badge{display:inline-block;background:#1f2937;border:1px solid #374151;border-radius:8px;padding:.15rem .45rem;margin-left:.25rem;font-size:.75rem}
+  /* ===== モーダルINPUT ===== */
+  .modal{position:fixed;inset:0;background:rgba(0,0,0,.55);display:none;align-items:center;justify-content:center;z-index:100}
+  .panel{width:min(520px,92vw);background:#161a22;border:1px solid #2a2f3b;border-radius:12px;padding:1rem}
+  .panel input{width:100%;background:#0c0f15;color:#e8eefa;border:1px solid #2a2f3b;border-radius:8px;padding:.6rem .7rem;font-family:ui-monospace,monospace}
+  .right{display:flex;gap:.5rem;justify-content:flex-end;margin-top:.6rem}
+</style>
+</head>
+<body>
+<header>
+  <h1>JIS-BASICエミュレータ</h1>
+  <button class="run"  id="btnRun">▶ 実行</button>
+  <button class="stop" id="btnStop">■ 停止</button>
+  <button class="reset"id="btnReset">↺ リセット</button>
+  <button class="clear"id="btnClear">🧹 クリア</button>
+  <button class="run"  id="btnStep">▶︎ 1行実行</button>
+  <label class="chk"><input type="checkbox" id="chkStep" checked> ステップON</label>
+  <span class="badge">ELSE対応</span><span class="badge">FOR STEP</span><span class="badge">キャンセルで最初のINPUTへ戻る</span><span class="badge">iPadドラッグOK</span>
+</header>
+
+<div class="wrap">
+  <!-- スプリッタ（ドラッグでサイズ変更） -->
+  <div class="vsplit" id="vsplit" role="separator" aria-orientation="vertical"></div>
+  <div class="hsplit" id="hsplit" role="separator" aria-orientation="horizontal"></div>
+
+  <div class="grid" id="grid">
+    <!-- 左上：エディタ -->
+    <div class="pane" style="grid-area:1/1/2/2">
+      <h2>📘 コードエディタ</h2>
+      <div class="pane-body">
+        <textarea id="editor" spellcheck="false">100 PRINT "テスト開始"
+110 LET S = 0
+120 FOR I = 1 TO 5
+130 LET S = S + I
+140 NEXT I
+150 IF S >= 15 THEN 180
+160 PRINT "ここは表示されないはず"
+170 GOTO 190
+180 PRINT "合計="; S
+190 END</textarea>
+        <div class="hint">ヒント：行番号必須／IFは単文<code>IF c THEN s ELSE t</code>とブロック<code>IF c THEN ... ELSE ... END IF</code>対応／FORは<code>STEP</code>可／<code>INPUT</code>はキャンセルで最初のINPUTへ戻ります。</div>
+      </div>
+    </div>
+
+    <!-- 右上：実行画面 -->
+    <div class="pane" style="grid-area:1/2/2/3">
+      <h2>🖥️ 実行画面</h2>
+      <div class="pane-body"><div class="console" id="console"></div></div>
+    </div>
+
+    <!-- 左下：変数ビュー -->
+    <div class="pane" style="grid-area:2/1/3/2">
+      <h2>🔎 変数ビュー</h2>
+      <div class="pane-body">
+        <table id="vartable">
+          <thead><tr><th>変数</th><th>前回</th><th>現在</th><th>変化</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- 右下：トレース -->
+    <div class="pane" style="grid-area:2/2/3/3">
+      <h2>📜 トレース（行ごとの因果）</h2>
+      <div class="pane-body"><div id="trace" class="trace"></div></div>
+    </div>
+  </div>
+</div>
+
+<!-- 入力モーダル -->
+<div class="modal" id="modal">
+  <div class="panel">
+    <div id="modalPrompt" style="margin:.2rem 0 .5rem 0">? </div>
+    <input id="modalInput" placeholder="例: 6,8,10" />
+    <div class="right">
+      <button class="clear" id="modalCancel">キャンセル</button>
+      <button class="run"   id="modalOk">OK</button>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ========== 汎用UI ========== */
+const con = document.getElementById('console');
+const ed  = document.getElementById('editor');
+const vt  = document.querySelector('#vartable tbody');
+const trc = document.getElementById('trace');
+function W(s){ con.textContent += s; con.scrollTop = con.scrollHeight; }
+function C(){ con.textContent=''; trc.textContent=''; vt.innerHTML=''; }
+function addTrace(s){ trc.textContent += s + "\n"; trc.scrollTop = trc.scrollHeight; }
+let prevVars={};
+function renderVars(vars){
+  const keys = Object.keys(vars).sort();
+  vt.innerHTML = keys.map(k=>{
+    const p = (k in prevVars)? prevVars[k] : '';
+    const c = vars[k];
+    const d = (p===''? '' : (c-p));
+    return `<tr><td>${k}</td><td>${p}</td><td>${c}</td><td class="delta">${d=== ''?'':(d>=0?'+':'')}${d}</td></tr>`;
+  }).join('');
+  prevVars = Object.assign({}, vars);
+}
+
+/* ========== ドラッグ・スプリッタ：Pointer + 旧API フォールバック（iPad可） ========== */
+(function(){
+  const grid  = document.getElementById('grid');
+  const vs    = document.getElementById('vsplit');
+  const hs    = document.getElementById('hsplit');
+  let colRatio = 0.5, rowRatio = 0.55;
+
+  const clamp = (v,min=0.15,max=0.85)=> Math.min(max, Math.max(min, v));
+  function apply(){
+    grid.style.gridTemplateColumns = `${colRatio*100}% ${100-colRatio*100}%`;
+    grid.style.gridTemplateRows    = `${rowRatio*100}% ${100-rowRatio*100}%`;
+    vs.style.left = `calc(${colRatio*100}% - 6px)`;
+    hs.style.top  = `calc(${rowRatio*100}% - 6px)`;
+  }
+  apply();
+
+  function startDrag(axis, e){
+    e.preventDefault();
+    const prevUserSelect = document.body.style.userSelect;
+    const prevTouchAction = document.body.style.touchAction;
+    document.body.style.userSelect = 'none';
+    document.body.style.touchAction = 'none';
+
+    let active = true;
+    const rect = ()=> grid.getBoundingClientRect();
+
+    function move(ev){
+      if(!active) return;
+      const cx = (ev.clientX != null) ? ev.clientX :
+                 (ev.touches && ev.touches[0] ? ev.touches[0].clientX : null);
+      const cy = (ev.clientY != null) ? ev.clientY :
+                 (ev.touches && ev.touches[0] ? ev.touches[0].clientY : null);
+      const r = rect();
+      if(axis==='x' && cx!=null){
+        colRatio = clamp((cx - r.left)/r.width);
+      }else if(axis==='y' && cy!=null){
+        rowRatio = clamp((cy - r.top )/r.height);
+      }
+      apply();
+    }
+    function up(){
+      active = false;
+      document.removeEventListener('pointermove', move);
+      document.removeEventListener('pointerup',   up);
+      document.removeEventListener('pointercancel', up);
+      document.removeEventListener('mousemove',   move, {passive:false});
+      document.removeEventListener('mouseup',     up);
+      document.removeEventListener('touchmove',   move, {passive:false});
+      document.removeEventListener('touchend',    up);
+      document.removeEventListener('touchcancel', up);
+      document.body.style.userSelect = prevUserSelect;
+      document.body.style.touchAction = prevTouchAction;
+    }
+
+    if (window.PointerEvent) {
+      document.addEventListener('pointermove', move, {passive:false});
+      document.addEventListener('pointerup',   up,   {once:true});
+      document.addEventListener('pointercancel', up, {once:true});
+    } else {
+      document.addEventListener('mousemove', move, {passive:false});
+      document.addEventListener('mouseup',   up,   {once:true});
+      document.addEventListener('touchmove', move, {passive:false});
+      document.addEventListener('touchend',  up,   {once:true});
+      document.addEventListener('touchcancel', up, {once:true});
+    }
+  }
+
+  const onDownX = (e)=> startDrag('x', e);
+  const onDownY = (e)=> startDrag('y', e);
+
+  ['pointerdown','mousedown','touchstart'].forEach(type=>{
+    vs.addEventListener(type, onDownX, {passive:false});
+    hs.addEventListener(type, onDownY, {passive:false});
+  });
+})();
+
+/* ========== モーダルINPUT（キャンセル→最初のINPUTへ） ========== */
+const modal=document.getElementById('modal');
+const modalPrompt=document.getElementById('modalPrompt');
+const modalInput=document.getElementById('modalInput');
+let resolver=null;
+document.getElementById('modalOk').onclick=()=>{ const r=resolver; resolver=null; modal.style.display='none'; if(r) r(modalInput.value); };
+document.getElementById('modalCancel').onclick=()=>{ const r=resolver; resolver=null; modal.style.display='none'; if(r) r(null); };
+function ask(prompt){ return new Promise(res=>{ resolver=res; modalPrompt.textContent=prompt||'? '; modalInput.value=''; modal.style.display='flex'; modalInput.focus(); }); }
+
+/* ========== トークナイザ & 式評価（eval不使用） ========== */
+function tokenize(s){
+  const out=[]; let i=0;
+  const isA=c=>/[A-Za-z_]/.test(c), isN=c=>/[A-Za-z0-9_]/.test(c);
+  while(i<s.length){
+    const c=s[i];
+    if(/\s/.test(c)){ i++; continue; }
+    if(c=='"'){ let j=i+1,t=''; while(j<s.length && s[j]!='"'){ t+=s[j++]; } j++; out.push({t:'str',v:t}); i=j; continue; }
+    if(/[0-9.]/.test(c)){ let j=i,num='',dot=false; while(j<s.length && /[0-9.]/.test(s[j])){ if(s[j]==='.'&&dot) break; if(s[j]==='.') dot=true; num+=s[j++]; } out.push({t:'num',v:Number(num)}); i=j; continue; }
+    if(isA(c)){ let j=i,id=''; while(j<s.length && isN(s[j])) id+=s[j++]; const up=id.toUpperCase(); if(up==='AND'||up==='OR') out.push({t:'op',v:up}); else out.push({t:'id',v:up}); i=j; continue; }
+    const two=s.slice(i,i+2);
+    if(['>=','<=','<>'].includes(two)){ out.push({t:'op',v:two}); i+=2; continue; }
+    if('+-*/^=()'.includes(c)){ if(c==='('||c===')') out.push({t:'par',v:c}); else out.push({t:'op',v:c}); i++; continue; }
+    if(c===','){ out.push({t:'comma'}); i++; continue; }
+    throw new Error('未知の文字: '+c);
+  }
+  out.push({t:'eof'}); return out;
+}
+function makeEvaluator(vars){
+  const key=s=>s.toUpperCase(); const get=n=> vars[key(n)] ?? 0;
+  const toks=[]; let i=0;
+  function parse(expr){ toks.length=0; tokenize(expr).forEach(t=>toks.push(t)); i=0; return E(); }
+  const peek=()=>toks[i]||{t:'eof'}; const pop=()=>toks[i++]||{t:'eof'}; const num=v=> typeof v==='boolean'?(v?1:0):(typeof v==='number'?v:Number(v));
+  function E(){ return Or(); }
+  function Or(){ let L=And(); while(peek().t==='op'&&peek().v==='OR'){ pop(); const R=And(); L=(num(L)||num(R))?1:0; } return L; }
+  function And(){ let L=Cmp(); while(peek().t==='op'&&peek().v==='AND'){ pop(); const R=Cmp(); L=(num(L)&&num(R))?1:0; } return L; }
+  function Cmp(){ let L=Add(); const p=peek(); if(p.t==='op'&&['=','<>','<','<=','>','>='].includes(p.v)){ pop(); const R=Add(); switch(p.v){case '=':return (L==R)?1:0;case '<>':return (L!=R)?1:0;case '<':return (num(L)<num(R))?1:0;case '<=':return (num(L)<=num(R))?1:0;case '>':return (num(L)>num(R))?1:0;case '>=':return (num(L)>=num(R))?1:0;} } return L; }
+  function Add(){ let L=Mul(); while(peek().t==='op'&&(peek().v==='+'||peek().v==='-')){ const op=pop().v; const R=Mul(); L=(op==='+')? num(L)+num(R) : num(L)-num(R); } return L; }
+  function Mul(){ let L=Pow(); while(peek().t==='op'&&(peek().v==='*'||peek().v==='/')){ const op=pop().v; const R=Pow(); L=(op==='*')? num(L)*num(R) : num(L)/num(R); } return L; }
+  function Pow(){ let L=Unary(); while(peek().t==='op'&&peek().v==='^'){ pop(); const R=Unary(); L=Math.pow(num(L),num(R)); } return L; }
+  function Unary(){ const p=peek(); if(p.t==='op'&&(p.v==='+'||p.v==='-')){ pop(); const v=Unary(); return p.v==='-'? -num(v) : num(v); } return Primary(); }
+  function Primary(){ const t=peek(); if(t.t==='num'){ pop(); return t.v; } if(t.t==='str'){ pop(); return t.v; } if(t.t==='id'){ pop(); return get(t.v);} if(t.t==='par'&&t.v==='('){ pop(); const v=E(); if(peek().t!=='par'||peek().v!==')') throw new Error(')が必要'); pop(); return v; } throw new Error('式エラー'); }
+  return (expr)=>parse(expr);
+}
+
+/* ========== インタプリタ（ステップ・ELSE・FOR STEP・キャンセル戻り） ========== */
+const Interpreter = ()=>{
+  let program=[], indexByLine={}, elseMap=new Map(), endifMap=new Map();
+  let vars={}, ev, running=false, pc=0, loopStack=[];
+  let firstInputIndex=null;
+  function parse(src){
+    program=[]; indexByLine={}; elseMap.clear(); endifMap.clear();
+    const raw=src.split(/\r?\n/).filter(l=>l.trim()!=='');
+    for(const r of raw){
+      const m=r.match(/^\s*(\d+)\s+(.*)$/); if(!m) throw new Error('行番号が必要: '+r);
+      program.push({ln:parseInt(m[1],10), text:m[2].trim()});
+    }
+    program.sort((a,b)=>a.ln-b.ln);
+    program.forEach((st,i)=> indexByLine[st.ln]=i);
+    // IFブロック対応
+    const st=[];
+    for(let i=0;i<program.length;i++){
+      const up=program[i].text.toUpperCase();
+      if(/^IF\s+.+\s+THEN\s*$/.test(up)){ st.push(i); continue; }
+      if(/^ELSE\s*$/.test(up)){ if(!st.length) throw new Error('ELSE の前に IF がありません（行 '+program[i].ln+'）'); const s=st[st.length-1]; elseMap.set(s,i); continue; }
+      if(/^END\s+IF\s*$/.test(up)){ if(!st.length) throw new Error('END IF の前に IF がありません（行 '+program[i].ln+'）'); const s=st.pop(); endifMap.set(s,i); }
+    }
+    if(st.length){ const s=program[st.pop()].ln; throw new Error('IF（行 '+s+'）に対応する END IF がありません'); }
+  }
+  function print(body){
+    if(body.trim()===''){ W('\n'); return; }
+    const trail=(/[;]$/.test(body))? ';' : '';
+    const out=(trail? body.slice(0,-1):body);
+    const rendered = out.replace(/"([^"]*)"/g,(_,w)=>`\u0000${w}\u0000`)
+      .split(/\s*;\s*|\s*,\s*/).map(tok=>{
+        if(tok.startsWith('\u0000')&&tok.endsWith('\u0000')) return tok.slice(1,-1);
+        return String(ev(tok));
+      }).join(' ');
+    W(rendered + (trail? '' : '\n'));
+  }
+  async function stepOnce(){
+    if(pc>=program.length){ running=false; return false; }
+    const {ln,text}=program[pc];
+    const up=text.toUpperCase();
+    addTrace(`行 ${ln}  ${text}`);
+    if(/^REM\b|^!/.test(up)){ pc++; return true; }
+    if(/^(END|STOP)\b/.test(up)){ running=false; pc=program.length; return false; }
+    if(/^LET\s+/i.test(text) || /^[A-Za-z_][A-Za-z0-9_]*\s*=/.test(text)){
+      const code=text.replace(/^LET\s+/i,''); const m=code.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+)$/);
+      if(!m) throw new Error('代入の構文エラー（行 '+ln+'）'); vars[m[1].toUpperCase()]=ev(m[2]); renderVars(vars); pc++; return true;
+    }
+    if(/^PRINT\b/i.test(up)){ print(text.replace(/^PRINT\s*/i,'')); pc++; return true; }
+    if(/^INPUT\b/i.test(up)){
+      if(firstInputIndex==null) firstInputIndex=pc;
+      const code=text.replace(/^INPUT\s*/i,'').trim();
+      let prompt='? ', varlist=code; const mm=code.match(/^\"(.*?)\"\s*[:;]\s*(.*)$/);
+      if(mm){ prompt=mm[1]; varlist=mm[2]; }
+      const names=varlist.split(',').map(s=>s.trim()).filter(Boolean);
+      const ans = await ask(prompt);
+      if(ans==null){
+        W('↩ 入力をキャンセルしました。最初のINPUTに戻ります。\n');
+        vars={}; prevVars={}; renderVars(vars);
+        pc = firstInputIndex; return true;
+      }
+      const vals=(ans+'').split(',').map(s=>s.trim());
+      names.forEach((n,i)=> vars[n.toUpperCase()] = (vals[i]===''?0:(isNaN(Number(vals[i]))? vals[i] : Number(vals[i]))));
+      renderVars(vars); pc++; return true;
+    }
+    let mg=up.match(/^GOTO\s+(\d+)/);
+    if(mg){ const t=+mg[1]; if(indexByLine[t]==null) throw new Error('行 '+t+' が見つかりません'); pc=indexByLine[t]; return true; }
+    // 単文IF（ELSE対応）
+    let m1=text.match(/^IF\s+(.+?)\s+THEN\s+(.+?)\s*(?:ELSE\s+(.+))?$/i);
+    if(m1){
+      const cond = !!ev(m1[1]); const stmt = cond ? m1[2] : m1[3];
+      if(stmt){ program.splice(pc+1,0,{ln,text:stmt}); } pc++; return true;
+    }
+    // ブロックIF
+    let mIfOnly = text.match(/^IF\s+(.+?)\s+THEN\s*$/i);
+    if(mIfOnly){
+      const cond=!!ev(mIfOnly[1]); const eIdx=endifMap.get(pc); const elseIdx=elseMap.get(pc);
+      if(eIdx==null) throw new Error('END IF が見つかりません（行 '+ln+'）');
+      if(cond){ pc++; } else { pc = (elseIdx!=null? elseIdx : eIdx); }
+      return true;
+    }
+    if(/^ELSE\s*$/i.test(up)){
+      let depth=0; for(let j=pc+1;j<program.length;j++){
+        const u=program[j].text.toUpperCase();
+        if(/^IF\s+.+\s+THEN\s*$/.test(u)) depth++;
+        if(/^END\s+IF\s*$/.test(u)){ if(depth===0){ pc=j+1; return true; } else depth--; }
+      }
+      throw new Error('ELSE に対応する END IF が見つかりません');
+    }
+    if(/^END\s+IF\s*$/i.test(up)){ pc++; return true; }
+    // FOR / NEXT
+    let mf=text.match(/^FOR\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+?)\s+TO\s+(.+?)(?:\s+STEP\s+(.+))?\s*$/i);
+    if(mf){
+      const v=mf[1].toUpperCase(), init=Number(ev(mf[2])), fin=Number(ev(mf[3])), step=(mf[4]!=null)?Number(ev(mf[4])):1;
+      if(!isFinite(init)||!isFinite(fin)||!isFinite(step)||step===0) throw new Error('FORの値が不正（行 '+ln+'）');
+      vars[v]=init; renderVars(vars);
+      let depth=0,nextIndex=-1; for(let j=pc+1;j<program.length;j++){
+        const u=program[j].text.toUpperCase();
+        if(/^FOR\b/.test(u)) depth++;
+        if(/^NEXT\b/.test(u)){ if(depth===0){ nextIndex=j; break; } else depth--; }
+      }
+      if(nextIndex<0) throw new Error('FOR に対応する NEXT が見つかりません（行 '+ln+'）');
+      const exec = (step>0)? (init<=fin) : (init>=fin);
+      if(!exec){ pc=nextIndex+1; } else { loopStack.push({v,fin,step,start:pc+1,nextIndex}); pc++; }
+      return true;
+    }
+    let mn=text.match(/^NEXT\s*([A-Za-z_][A-Za-z0-9_]*)?\s*$/i);
+    if(mn){
+      if(loopStack.length===0) throw new Error('NEXTに対応するFORがありません（行 '+ln+'）');
+      const ctx=loopStack[loopStack.length-1];
+      if(mn[1] && mn[1].toUpperCase()!==ctx.v) throw new Error('NEXT '+mn[1]+' は FOR '+ctx.v+' と一致しません');
+      vars[ctx.v] = Number(vars[ctx.v]) + ctx.step; renderVars(vars);
+      const cont = (ctx.step>0)? (vars[ctx.v] <= ctx.fin) : (vars[ctx.v] >= ctx.fin);
+      pc = cont ? ctx.start : (loopStack.pop(), pc+1);
+      return true;
+    }
+    throw new Error('未知の文（行 '+ln+'）: '+text);
+  }
+  async function run(stepMode){
+    running=true; ev = makeEvaluator(vars);
+    while(running && pc<program.length){
+      ev = makeEvaluator(vars);
+      const progressed = await stepOnce();
+      if(!progressed) break;
+      if(stepMode) break;
+    }
+  }
+  return {
+    load(src){ vars={}; prevVars={}; renderVars(vars); parse(src); pc=0; loopStack=[]; firstInputIndex=null; },
+    async runCont(stepMode){ try{ await run(stepMode); }catch(e){ W('⚠️ 実行時エラー: '+e.message+'\n'); } },
+    stop(){ running=false; },
+    get pc(){ return pc; }, get program(){ return program; }, get vars(){ return vars; }
+  }
+};
+const I = Interpreter();
+
+/* ========== ボタン動作 ========== */
+document.getElementById('btnRun').onclick = async ()=>{
+  C(); I.load(ed.value); W('🚀 プログラム実行開始\n');
+  while(true){
+    const step = document.getElementById('chkStep').checked;
+    await I.runCont(step);
+    if(step || I.pc>=I.program.length) break;
+  }
+};
+document.getElementById('btnStep').onclick = async ()=>{
+  if(I.program.length===0){ C(); I.load(ed.value); W('🚀 ステップ実行開始\n'); }
+  await I.runCont(true);
+};
+document.getElementById('btnStop').onclick = ()=> I.stop();
+document.getElementById('btnReset').onclick = ()=>{
+  I.stop(); C();
+  ed.value = `100 PRINT "テスト開始"
+110 LET S = 0
+120 FOR I = 1 TO 5
+130 LET S = S + I
+140 NEXT I
+150 IF S >= 15 THEN 180
+160 PRINT "ここは表示されないはず"
+170 GOTO 190
+180 PRINT "合計="; S
+190 END`;
+  W('🔄 リセットしました\n');
+};
+document.getElementById('btnClear').onclick = ()=>{ I.stop(); C(); ed.value=''; W('🧹 クリアしました（新しいプログラムを入力）\n'); };
+</script>
+</body>
+</html>
